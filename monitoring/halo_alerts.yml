@@ -1,0 +1,156 @@
+groups:
+  - name: halo_critical
+    rules:
+      # Halo Indexer Down
+      - alert: HaloIndexerDown
+        expr: up{job="halo-indexer"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Halo Indexer is down"
+          description: "Halo Indexer has been down for more than 1 minute"
+
+      # High Error Rate
+      - alert: HighErrorRate
+        expr: rate(api_errors_total[5m]) / rate(api_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is above 5% for 2 minutes"
+
+      # High Response Time
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High response time detected"
+          description: "95th percentile response time is above 1 second"
+
+      # System Resources
+      - alert: HighCPUUsage
+        expr: system_cpu_usage_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is above 80% for 5 minutes"
+
+      - alert: HighMemoryUsage
+        expr: system_memory_usage_bytes / 1024 / 1024 / 1024 > 8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is above 8GB for 5 minutes"
+
+      - alert: HighDiskUsage
+        expr: system_disk_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk usage"
+          description: "Disk usage is above 85% for 5 minutes"
+
+  - name: halo_business
+    rules:
+      # Low Post Activity
+      - alert: LowPostActivity
+        expr: rate(posts_created_total[10m]) < 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low post activity"
+          description: "Less than 1 post per minute for 15 minutes"
+
+      # Trinity Leader Election
+      - alert: TrinityLeaderElection
+        expr: increase(trinity_leader_elections_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Trinity leader election occurred"
+          description: "A new leader election happened in the Trinity system"
+
+      # Trinity Node Down
+      - alert: TrinityNodeDown
+        expr: trinity_node_status == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Trinity node is down"
+          description: "A Trinity node has been down for more than 2 minutes"
+
+  - name: halo_database
+    rules:
+      # Database Connection Issues
+      - alert: HighDatabaseConnections
+        expr: database_connections > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database connections"
+          description: "More than 100 active database connections"
+
+      # Slow Database Queries
+      - alert: SlowCassandraQueries
+        expr: histogram_quantile(0.95, rate(cassandra_query_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow Cassandra queries"
+          description: "95th percentile Cassandra query time is above 0.5 seconds"
+
+      # Slow Redis Operations
+      - alert: SlowRedisOperations
+        expr: histogram_quantile(0.95, rate(redis_operation_duration_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow Redis operations"
+          description: "95th percentile Redis operation time is above 0.1 seconds"
+
+  - name: halo_performance
+    rules:
+      # Batch Processing Issues
+      - alert: SlowBatchProcessing
+        expr: histogram_quantile(0.95, rate(batch_processing_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow batch processing"
+          description: "95th percentile batch processing time is above 30 seconds"
+
+      # High Heartbeat Latency
+      - alert: HighHeartbeatLatency
+        expr: histogram_quantile(0.95, rate(trinity_heartbeat_latency_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Trinity heartbeat latency"
+          description: "95th percentile heartbeat latency is above 1 second"
+
+      # Low Throughput
+      - alert: LowThroughput
+        expr: rate(api_requests_total[5m]) < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low API throughput"
+          description: "Less than 10 requests per second for 10 minutes" 

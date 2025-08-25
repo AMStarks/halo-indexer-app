@@ -1,0 +1,165 @@
+const crypto = require(crypto);
+const jwt = require(jsonwebtoken);
+const { getRedisClient } = require(./redis);
+const logger = require(../utils/logger);
+const EC = require(elliptic).ec;
+const ec = new EC(secp256k1);
+
+const DEFAULT_TTL_SECONDS = parseInt(process.env.HALO_CHALLENGE_TTL || 120, 10);
+
+async function createChallenge(address, bundleId) {
+  if (!address || typeof address !== string) {
+    throw new Error(Address is required);
+  }
+
+  const nonce = crypto.randomBytes(16).toString(hex);
+  const ttlSeconds = DEFAULT_TTL_SECONDS;
+  const expiresAt = Date.now() + ttlSeconds * 1000;
+
+  const client = await getRedisClient();
+  const key = ;
+  await client.hSet(key, {
+    address,
+    nonce,
+    bundleId: bundleId || ,
+    ttlSeconds: ttlSeconds.toString(),
+    createdAt: Date.now().toString(),
+    expiresAt: expiresAt.toString()
+  });
+  await client.expire(key, ttlSeconds);
+
+  logger.info(Created auth challenge, { address: address.slice(0, 10) + ..., nonce, ttlSeconds, bundleId: bundleId ||  });
+
+  return { nonce, ttlSeconds, expiresAt };
+}
+
+async function consumeChallenge(address, nonce) {
+  const client = await getRedisClient();
+  const key = ;
+  const data = await client.hGetAll(key);
+  if (!data || Object.keys(data).length === 0) {
+    return null;
+  }
+  await client.del(key);
+  return data;
+}
+
+function issueAccessToken(address, bundleId) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error(JWT_SECRET not configured);
+  }
+
+  const issuer = process.env.JWT_ISSUER || halo-indexer;
+  const audience = process.env.JWT_AUDIENCE || lasko-clients;
+  const expiresSeconds = parseInt(process.env.JWT_EXPIRES_SECONDS || 900, 10);
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: address,
+    aud: audience,
+    iat: nowSeconds,
+    nbf: nowSeconds,
+    iss: issuer,
+    bundleId: bundleId || 
+  };
+
+  const token = jwt.sign(payload, secret, { algorithm: HS256, expiresIn: expiresSeconds });
+  return { token, expiresSeconds };
+}
+
+module.exports = {
+  createChallenge,
+  consumeChallenge,
+  issueAccessToken,
+  verifyTelestaiSignature
+};
+
+function verifyTelestaiSignature({ message, signatureBase64, pubkeyCompressedHex }) {
+  try {
+    if (!message || !signatureBase64 || !pubkeyCompressedHex) {
+      return false;
+    }
+
+    let b64 = String(signatureBase64).replace(/-/g, +).replace(/_/g, /);
+    const pad = b64.length % 4;
+    if (pad === 2) b64 += ==;
+    else if (pad === 3) b64 += =;
+
+    const sigBuf = Buffer.from(b64, base64);
+    let sig;
+    try {
+      sig = ec.signatureFromDER(sigBuf);
+    } catch {
+      if (sigBuf.length === 64) {
+        sig = { r: sigBuf.slice(0, 32).toString(hex), s: sigBuf.slice(32, 64).toString(hex) };
+      } else {
+        const parsed = parseDerEcdsaSignature(sigBuf);
+        if (!parsed) return false;
+        sig = parsed;
+      }
+    }
+
+    const hash = crypto.createHash(sha256).update(message).digest();
+
+    const pubHex = String(pubkeyCompressedHex || ).replace(/^0x/i, );
+    const key = ec.keyFromPublic(pubHex, hex);
+
+    const ok = key.verify(hash, sig);
+    if (!ok) return false;
+
+    return true;
+  } catch (e) {
+    logger.error(verifyTelestaiSignature error, e);
+    return false;
+  }
+}
+
+function parseDerEcdsaSignature(buf) {
+  try {
+    let offset = 0;
+    if (buf[offset++] !== 0x30) return null;
+
+    let seqLen = buf[offset++];
+    if (seqLen & 0x80) {
+      const numBytes = seqLen & 0x7f;
+      if (numBytes === 0 || numBytes > 2) return null;
+      if (offset + numBytes > buf.length) return null;
+      seqLen = 0;
+      for (let i = 0; i < numBytes; i++) seqLen = (seqLen << 8) | buf[offset++];
+    }
+
+    if (buf[offset++] !== 0x02) return null;
+    let rLen = buf[offset++];
+    if (rLen & 0x80) {
+      const n = rLen & 0x7f;
+      if (n === 0 || n > 2) return null;
+      if (offset + n > buf.length) return null;
+      rLen = 0;
+      for (let i = 0; i < n; i++) rLen = (rLen << 8) | buf[offset++];
+    }
+    const r = buf.slice(offset, offset + rLen);
+    offset += rLen;
+
+    if (buf[offset++] !== 0x02) return null;
+    let sLen = buf[offset++];
+    if (sLen & 0x80) {
+      const n = sLen & 0x7f;
+      if (n === 0 || n > 2) return null;
+      if (offset + n > buf.length) return null;
+      sLen = 0;
+      for (let i = 0; i < n; i++) sLen = (sLen << 8) | buf[offset++];
+    }
+    const s = buf.slice(offset, offset + sLen);
+
+    return { r: stripLeadingZero(r).toString(hex), s: stripLeadingZero(s).toString(hex) };
+  } catch {
+    return null;
+  }
+}
+
+function stripLeadingZero(b) {
+  let i = 0;
+  while (i < b.length - 1 && b[i] === 0x00) i++;
+  return b.slice(i);
+}

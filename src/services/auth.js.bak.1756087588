@@ -1,0 +1,168 @@
+const crypto = require('');
+const jwt = require('');
+const { getRedisClient } = require('./redis');
+const logger = require('../utils/logger');
+const EC = require('').ec;
+const ec = new EC('');
+
+const DEFAULT_TTL_SECONDS = parseInt(process.env.HALO_CHALLENGE_TTL || 120, 10);
+
+async function createChallenge(address, bundleId) {
+  if (!address || typeof address !== '') {
+    throw new Error('');
+  }
+
+  const nonce = crypto.randomBytes(16).toString('');
+  const ttlSeconds = DEFAULT_TTL_SECONDS;
+  const expiresAt = Date.now() + ttlSeconds * 1000;
+
+  const client = await getRedisClient();
+  const key = 'halo:auth:challenge:' + address + ':' + nonce;
+  await client.hSet(key, {
+    address: address,
+    nonce: nonce,
+    bundleId: bundleId || '',
+    ttlSeconds: ttlSeconds.toString(),
+    createdAt: Date.now().toString(),
+    expiresAt: expiresAt.toString()
+  });
+  await client.expire(key, ttlSeconds);
+  logger.info('Created auth challenge', { address: address.slice(0, 10) + '...', nonce: nonce, ttlSeconds: ttlSeconds, bundleId: bundleId || '' });
+
+  return { nonce: nonce, ttlSeconds: ttlSeconds, expiresAt: expiresAt };
+}
+
+async function consumeChallenge(address, nonce) {
+  const client = await getRedisClient();
+  const key = halo:auth:challenge: + address + : + nonce;
+  const data = await client.hGetAll(key);
+  if (!data || Object.keys(data).length === 0) {
+    return null;
+  }
+  await client.del(key);
+  return data;
+}
+
+function issueAccessToken(address, bundleId) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error(JWT_SECRET not configured);
+  }
+
+  const issuer = process.env.JWT_ISSUER || halo-indexer;
+  const audience = process.env.JWT_AUDIENCE || lasko-clients;
+  const expiresSeconds = parseInt(process.env.JWT_EXPIRES_SECONDS || 900, 10);
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: address,
+    aud: audience,
+    iat: nowSeconds,
+    nbf: nowSeconds,
+    iss: issuer,
+    bundleId: bundleId || 
+  };
+
+  const token = jwt.sign(payload, secret, { algorithm: HS256, expiresIn: expiresSeconds });
+  return { token: token, expiresSeconds: expiresSeconds };
+}
+
+module.exports = {
+  createChallenge: createChallenge,
+  consumeChallenge: consumeChallenge,
+  issueAccessToken: issueAccessToken,
+  verifyTelestaiSignature: verifyTelestaiSignature
+};
+
+function verifyTelestaiSignature(params) {
+  try {
+    if (!params || !params.message || !params.signatureBase64 || !params.pubkeyCompressedHex) {
+      return false;
+    }
+
+    var message = String(params.message);
+    var signatureBase64 = String(params.signatureBase64);
+    var pubkeyCompressedHex = String(params.pubkeyCompressedHex);
+
+    var b64 = signatureBase64.replace(/-/g, +).replace(/_/g, /);
+    var pad = b64.length % 4;
+    if (pad === 2) b64 += ==;
+    else if (pad === 3) b64 += =;
+
+    var sigBuf = Buffer.from(b64, base64);
+    var sig;
+    try {
+      sig = ec.signatureFromDER(sigBuf);
+    } catch (e) {
+      if (sigBuf.length === 64) {
+        sig = { r: sigBuf.slice(0, 32).toString(''), s: sigBuf.slice(32, 64).toString('') };
+      } else {
+        var parsed = parseDerEcdsaSignature(sigBuf);
+        if (!parsed) return false;
+        sig = parsed;
+      }
+    }
+
+    var hash = crypto.createHash(sha256).update(message).digest();
+
+    var pubHex = pubkeyCompressedHex.replace(/^0x/i, );
+    var key = ec.keyFromPublic(pubHex, hex);
+
+    var ok = key.verify(hash, sig);
+    if (!ok) return false;
+
+    return true;
+  } catch (e) {
+    logger.error(verifyTelestaiSignature error, e);
+    return false;
+  }
+}
+
+function parseDerEcdsaSignature(buf) {
+  try {
+    var offset = 0;
+    if (buf[offset++] !== 0x30) return null;
+
+    var seqLen = buf[offset++];
+    if (seqLen & 0x80) {
+      var numBytes = seqLen & 0x7f;
+      if (numBytes === 0 || numBytes > 2) return null;
+      if (offset + numBytes > buf.length) return null;
+      seqLen = 0;
+      for (var i = 0; i < numBytes; i++) seqLen = (seqLen << 8) | buf[offset++];
+    }
+
+    if (buf[offset++] !== 0x02) return null;
+    var rLen = buf[offset++];
+    if (rLen & 0x80) {
+      var n1 = rLen & 0x7f;
+      if (n1 === 0 || n1 > 2) return null;
+      if (offset + n1 > buf.length) return null;
+      rLen = 0;
+      for (var j = 0; j < n1; j++) rLen = (rLen << 8) | buf[offset++];
+    }
+    var r = buf.slice(offset, offset + rLen);
+    offset += rLen;
+
+    if (buf[offset++] !== 0x02) return null;
+    var sLen = buf[offset++];
+    if (sLen & 0x80) {
+      var n2 = sLen & 0x7f;
+      if (n2 === 0 || n2 > 2) return null;
+      if (offset + n2 > buf.length) return null;
+      sLen = 0;
+      for (var k = 0; k < n2; k++) sLen = (sLen << 8) | buf[offset++];
+    }
+    var s = buf.slice(offset, offset + sLen);
+
+    return { r: stripLeadingZero(r).toString(''), s: stripLeadingZero(s).toString('') };
+  } catch (e) {
+    return null;
+  }
+}
+
+function stripLeadingZero(b) {
+  var i = 0;
+  while (i < b.length - 1 && b[i] === 0x00) i++;
+  return b.slice(i);
+}

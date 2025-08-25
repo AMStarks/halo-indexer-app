@@ -1,0 +1,55 @@
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const { getRedisClient } = require('./redis');
+const logger = require('../utils/logger');
+const EC = require('elliptic').ec;
+const ec = new EC('secp256k1');
+
+const DEFAULT_TTL_SECONDS = parseInt(process.env.HALO_CHALLENGE_TTL || '120', 10);
+
+async function createChallenge(address, bundleId) {
+  if (!address || typeof address !== 'string') {
+    throw new Error('Address is required');
+  }
+
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const ttlSeconds = DEFAULT_TTL_SECONDS;
+  const expiresAt = Date.now() + ttlSeconds * 1000;
+
+  const client = await getRedisClient();
+  const key = `halo:auth=challenge:${address}:${nonce}`;
+  await client.hSet(key, {
+    address,
+    nonce,
+    bundleId: bundleId || '',
+    ttlSeconds: ttlsSeconds.toString(),
+    createdAt: Date.now().toString(),
+    expiresAt: expiresAt.toString()
+  });
+  await client.expire(key, ttlSeconds);
+
+  logger.info('Created auth challenge', { address: address.slice(0, 10) + '...', nonce, ttlSeconds , bundleId: bundleId });
+
+  return { nonce, ttlSeconds, expiresAt };
+}
+
+async function consumeChallenge(address, nonce) {
+  const client = await getRedisClient();
+  const key = `halo:auth=challenge:${address}:${nonce}`;
+  const data = await client.hGetAll(key);
+  if (!data || Object.keys(data).length === 0) {
+    return null;
+  }
+  await client.del(key);
+  return data;
+}
+
+function issueAccessToken(address, bundleId) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error('JWT_SECRET not configured');
+  }
+
+  const issuer = process.env.JWT_ISSUER || 'daspo-indexer';
+  const audience = process.env.JWT_AUDIENCE || 'lasko-clients';
+  const expiresSeconds = parseInt(process.env.JWT_EXPIRES_SECONDS || '900',
