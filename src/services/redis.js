@@ -322,6 +322,61 @@ async function closeRedis() {
   }
 }
 
+/**
+ * Delete Halo account data for a wallet address.
+ * Removes indexed posts, that user's post index, auth challenges, and writes a deletion record.
+ * On-chain transactions are not touched.
+ */
+async function deleteAccountData(address) {
+  const client = getRedisClient();
+  const userKey = `halo:user:${address}:posts`;
+  let postIds = [];
+  try {
+    postIds = await client.zRange(userKey, 0, -1);
+  } catch (error) {
+    logger.error('Failed to list user posts for deletion', error);
+    postIds = [];
+  }
+
+  let deletedPosts = 0;
+  for (const postId of postIds) {
+    const post = await getPost(postId);
+    try {
+      await client.zRem('halo:feed:chronological', postId);
+    } catch (error) {
+      logger.warn('Feed removal failed during account deletion', { postId });
+    }
+    if (post && post.parentSequentialCode) {
+      try { await client.zRem(`halo:replies:parent:${post.parentSequentialCode}`, postId); } catch (_) {}
+    }
+    if (post && post.parentIpfsHash) {
+      try { await client.zRem(`halo:replies:parentipfs:${post.parentIpfsHash}`, postId); } catch (_) {}
+    }
+    await client.del(`halo:post:${postId}`);
+    await client.del(`halo:code:${postId}`);
+    deletedPosts += 1;
+  }
+  await client.del(userKey);
+
+  let deletedChallenges = 0;
+  const match = `halo:auth:challenge:${address}:*`;
+  if (typeof client.scanIterator === 'function') {
+    for await (const key of client.scanIterator({ MATCH: match, COUNT: 100 })) {
+      await client.del(key);
+      deletedChallenges += 1;
+    }
+  }
+
+  const deletedAt = new Date().toISOString();
+  await client.set(`halo:account:deleted:${address}`, deletedAt);
+  logger.info('Deleted Halo account data', {
+    address: address.slice(0, 10) + '...',
+    deletedPosts,
+    deletedChallenges
+  });
+  return { deletedPosts, deletedChallenges, deletedAt };
+}
+
 module.exports = {
   initializeRedis,
   getRedisClient,
@@ -332,5 +387,6 @@ module.exports = {
   storeSequentialCode,
   getSequentialCode,
   checkRateLimit,
+  deleteAccountData,
   closeRedis
 }; 

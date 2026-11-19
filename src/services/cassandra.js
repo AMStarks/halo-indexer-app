@@ -347,6 +347,54 @@ async function closeCassandra() {
   }
 }
 
+/**
+ * Delete indexed posts for a wallet address. No-ops when Cassandra is not enabled.
+ */
+async function deleteAccountData(userAddress) {
+  if (!cassandraClient) {
+    return { skipped: true, deletedPosts: 0 };
+  }
+  const result = await cassandraClient.execute(
+    'SELECT sequential_code, timestamp FROM user_posts WHERE user_address = ?',
+    [userAddress],
+    { prepare: true }
+  );
+  let deletedPosts = 0;
+  for (const row of result.rows || []) {
+    const code = row.sequential_code;
+    const ts = row.timestamp;
+    if (!code) continue;
+    await cassandraClient.execute(
+      'DELETE FROM posts WHERE sequential_code = ?',
+      [code],
+      { prepare: true }
+    );
+    await cassandraClient.execute(
+      'DELETE FROM sequential_codes WHERE code = ?',
+      [code],
+      { prepare: true }
+    );
+    if (ts != null) {
+      await cassandraClient.execute(
+        'DELETE FROM chronological_feed WHERE feed_timestamp = ? AND sequential_code = ?',
+        [ts, code],
+        { prepare: true }
+      );
+    }
+    deletedPosts += 1;
+  }
+  await cassandraClient.execute(
+    'DELETE FROM user_posts WHERE user_address = ?',
+    [userAddress],
+    { prepare: true }
+  );
+  logger.info('Deleted Cassandra account data', {
+    address: userAddress.slice(0, 10) + '...',
+    deletedPosts
+  });
+  return { skipped: false, deletedPosts };
+}
+
 module.exports = {
   initializeCassandra,
   getCassandraClient,
@@ -355,5 +403,6 @@ module.exports = {
   getChronologicalFeed,
   storeBatch,
   storeSequentialCode,
+  deleteAccountData,
   closeCassandra
 }; 

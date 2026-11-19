@@ -1,6 +1,8 @@
 const express = require('express');
 const Joi = require('joi');
 const { createChallenge, consumeChallenge, issueAccessToken, verifyTelestaiSignature } = require('../services/auth');
+const { deleteAccountData } = require('../services/redis');
+const cassandra = require('../services/cassandra');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -74,6 +76,63 @@ router.post('/verify', async (req, res) => {
     res.json({ success: true, token, expiresIn: expiresSeconds });
   } catch (err) {
     logger.error('Verify failed', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/halo/account/delete
+// Same signed challenge as /verify. Deletes this address's Halo account data.
+// Does not move or destroy on-chain coins.
+router.post('/account/delete', async (req, res) => {
+  try {
+    const { error, value } = verifyBodySchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: 'Validation error', details: error.details[0].message });
+    }
+
+    const { address, nonce, signature, pubkey, bundleId } = value;
+    const challengeData = await consumeChallenge(address, nonce);
+    if (!challengeData) {
+      return res.status(400).json({ error: 'Invalid or expired challenge' });
+    }
+
+    const ttlSec = parseInt(challengeData.ttlSeconds || process.env.HALO_CHALLENGE_TTL || '120', 10);
+    const persistedBundleId = challengeData.bundleId || '';
+    if (bundleId && bundleId !== persistedBundleId) {
+      return res.status(400).json({ error: 'Bundle mismatch' });
+    }
+    const canonical = `LASKO|${nonce}|${ttlSec}|${persistedBundleId}`;
+    const ok = verifyTelestaiSignature({
+      message: canonical,
+      signatureBase64: signature,
+      pubkeyCompressedHex: pubkey,
+      address
+    });
+    if (!ok) {
+      return res.status(400).json({ error: 'Signature verification failed' });
+    }
+
+    const redisResult = await deleteAccountData(address);
+    let cassandraResult = { skipped: true, deletedPosts: 0 };
+    if (typeof cassandra.deleteAccountData === 'function') {
+      try {
+        cassandraResult = await cassandra.deleteAccountData(address);
+      } catch (cassandraError) {
+        logger.error('Cassandra account deletion failed', cassandraError);
+        cassandraResult = { skipped: false, error: 'cassandra_delete_failed', deletedPosts: 0 };
+      }
+    }
+
+    res.json({
+      success: true,
+      address,
+      deleted: {
+        redis: redisResult,
+        cassandra: cassandraResult
+      }
+    });
+  } catch (err) {
+    logger.error('Account deletion failed', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
