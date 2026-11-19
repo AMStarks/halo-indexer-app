@@ -323,58 +323,124 @@ async function closeRedis() {
 }
 
 /**
- * Delete Halo account data for a wallet address.
- * Removes indexed posts, that user's post index, auth challenges, and writes a deletion record.
- * On-chain transactions are not touched.
+ * Label kept on posts after account deletion. The TLS address stays on the post itself.
+ * @param {string} displayName
+ * @returns {string}
  */
-async function deleteAccountData(address) {
+function authorLabelForDeletedUser(displayName) {
+  const name = String(displayName || '')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 64);
+  return name ? `deleted user - ${name}` : 'deleted user';
+}
+
+/**
+ * Anonymise a Halo account without removing posts or breaking reply threads.
+ * Posts stay in the feed and in halo:user:{address}:posts. Their author label becomes
+ * "deleted user - <name>" while userAddress remains the TLS address.
+ * Profile, auth challenges, sessions, and contact keys are removed.
+ */
+async function deleteAccountData(address, displayName) {
   const client = getRedisClient();
+  const authorLabel = authorLabelForDeletedUser(displayName);
   const userKey = `halo:user:${address}:posts`;
   let postIds = [];
   try {
     postIds = await client.zRange(userKey, 0, -1);
   } catch (error) {
-    logger.error('Failed to list user posts for deletion', error);
+    logger.error('Failed to list user posts for account anonymisation', error);
     postIds = [];
   }
 
-  let deletedPosts = 0;
+  let relabeledPosts = 0;
   for (const postId of postIds) {
-    const post = await getPost(postId);
+    const postKey = `halo:post:${postId}`;
     try {
-      await client.zRem('halo:feed:chronological', postId);
+      const exists = await client.exists(postKey);
+      if (!exists) continue;
+      await client.hSet(postKey, {
+        authorLabel,
+        displayName: authorLabel,
+        accountDeleted: 'true',
+        userAddress: address
+      });
+      relabeledPosts += 1;
     } catch (error) {
-      logger.warn('Feed removal failed during account deletion', { postId });
+      logger.warn('Failed to relabel post during account deletion', { postId });
     }
-    if (post && post.parentSequentialCode) {
-      try { await client.zRem(`halo:replies:parent:${post.parentSequentialCode}`, postId); } catch (_) {}
-    }
-    if (post && post.parentIpfsHash) {
-      try { await client.zRem(`halo:replies:parentipfs:${post.parentIpfsHash}`, postId); } catch (_) {}
-    }
-    await client.del(`halo:post:${postId}`);
-    await client.del(`halo:code:${postId}`);
-    deletedPosts += 1;
   }
-  await client.del(userKey);
+
+  let deletedPersonalKeys = 0;
+  const personalKeys = [
+    `halo:profile:${address}`,
+    `halo:user:${address}:profile`,
+    `halo:user:${address}:sessions`,
+    `halo:user:${address}:contacts`,
+    `halo:contacts:${address}`,
+    `halo:session:${address}`,
+    `halo:sessions:${address}`,
+    `halo:auth:token:${address}`
+  ];
+  for (const key of personalKeys) {
+    try {
+      deletedPersonalKeys += await client.del(key);
+    } catch (error) {
+      logger.warn('Failed to delete personal key during account deletion', { key });
+    }
+  }
+
+  if (typeof client.scanIterator === 'function') {
+    const userMatch = `halo:user:${address}:*`;
+    for await (const key of client.scanIterator({ MATCH: userMatch, COUNT: 100 })) {
+      const keyName = Buffer.isBuffer(key) ? key.toString() : String(key);
+      if (keyName === userKey) continue;
+      try {
+        deletedPersonalKeys += await client.del(keyName);
+      } catch (error) {
+        logger.warn('Failed to delete user key during account deletion', { key });
+      }
+    }
+  }
 
   let deletedChallenges = 0;
   const match = `halo:auth:challenge:${address}:*`;
   if (typeof client.scanIterator === 'function') {
     for await (const key of client.scanIterator({ MATCH: match, COUNT: 100 })) {
-      await client.del(key);
-      deletedChallenges += 1;
+      try {
+        await client.del(key);
+        deletedChallenges += 1;
+      } catch (error) {
+        logger.warn('Failed to delete auth challenge during account deletion', { key });
+      }
     }
   }
 
   const deletedAt = new Date().toISOString();
-  await client.set(`halo:account:deleted:${address}`, deletedAt);
-  logger.info('Deleted Halo account data', {
+  const revokedBefore = Math.floor(Date.now() / 1000).toString();
+  await client.set(`halo:auth:revoked-before:${address}`, revokedBefore);
+  await client.set(`halo:account:deleted:${address}`, JSON.stringify({
+    deletedAt,
+    authorLabel,
+    address,
+    postsKept: true
+  }));
+  logger.info('Anonymised Halo account', {
     address: address.slice(0, 10) + '...',
-    deletedPosts,
-    deletedChallenges
+    relabeledPosts,
+    deletedChallenges,
+    deletedPersonalKeys
   });
-  return { deletedPosts, deletedChallenges, deletedAt };
+  return {
+    relabeledPosts,
+    deletedPosts: 0,
+    postsKept: true,
+    authorLabel,
+    deletedChallenges,
+    deletedPersonalKeys,
+    deletedAt
+  };
 }
 
 module.exports = {
@@ -388,5 +454,6 @@ module.exports = {
   getSequentialCode,
   checkRateLimit,
   deleteAccountData,
+  authorLabelForDeletedUser,
   closeRedis
 }; 

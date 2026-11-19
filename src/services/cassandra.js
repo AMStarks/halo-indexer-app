@@ -347,52 +347,57 @@ async function closeCassandra() {
   }
 }
 
+function authorLabelForDeletedUser(displayName) {
+  const name = String(displayName || '')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 64);
+  return name ? `deleted user - ${name}` : 'deleted user';
+}
+
 /**
- * Delete indexed posts for a wallet address. No-ops when Cassandra is not enabled.
+ * Keep posts and reply threads. Relabel the author and leave user_posts in place.
+ * No-ops when Cassandra is not enabled.
  */
-async function deleteAccountData(userAddress) {
+async function deleteAccountData(userAddress, displayName) {
   if (!cassandraClient) {
-    return { skipped: true, deletedPosts: 0 };
+    return { skipped: true, relabeledPosts: 0, postsKept: true };
   }
+  const authorLabel = authorLabelForDeletedUser(displayName);
+  try {
+    await cassandraClient.execute('ALTER TABLE posts ADD author_label text');
+  } catch (error) {
+    logger.warn('author_label column already present or could not be added');
+  }
+  try {
+    await cassandraClient.execute('ALTER TABLE posts ADD account_deleted boolean');
+  } catch (error) {
+    logger.warn('account_deleted column already present or could not be added');
+  }
+
   const result = await cassandraClient.execute(
     'SELECT sequential_code, timestamp FROM user_posts WHERE user_address = ?',
     [userAddress],
     { prepare: true }
   );
-  let deletedPosts = 0;
+  let relabeledPosts = 0;
   for (const row of result.rows || []) {
     const code = row.sequential_code;
-    const ts = row.timestamp;
     if (!code) continue;
     await cassandraClient.execute(
-      'DELETE FROM posts WHERE sequential_code = ?',
-      [code],
+      'UPDATE posts SET author_label = ?, account_deleted = ?, updated_at = ? WHERE sequential_code = ?',
+      [authorLabel, true, new Date(), code],
       { prepare: true }
     );
-    await cassandraClient.execute(
-      'DELETE FROM sequential_codes WHERE code = ?',
-      [code],
-      { prepare: true }
-    );
-    if (ts != null) {
-      await cassandraClient.execute(
-        'DELETE FROM chronological_feed WHERE feed_timestamp = ? AND sequential_code = ?',
-        [ts, code],
-        { prepare: true }
-      );
-    }
-    deletedPosts += 1;
+    relabeledPosts += 1;
   }
-  await cassandraClient.execute(
-    'DELETE FROM user_posts WHERE user_address = ?',
-    [userAddress],
-    { prepare: true }
-  );
-  logger.info('Deleted Cassandra account data', {
+  logger.info('Relabeled Cassandra posts for deleted account', {
     address: userAddress.slice(0, 10) + '...',
-    deletedPosts
+    relabeledPosts,
+    authorLabel
   });
-  return { skipped: false, deletedPosts };
+  return { skipped: false, relabeledPosts, deletedPosts: 0, postsKept: true, authorLabel };
 }
 
 module.exports = {

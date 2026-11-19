@@ -21,6 +21,10 @@ const verifyBodySchema = Joi.object({
   bundleId: Joi.string().optional()
 });
 
+const deleteBodySchema = verifyBodySchema.keys({
+  displayName: Joi.string().max(80).allow('').optional()
+});
+
 // GET /api/halo/challenge?address=&bundleId=
 router.get('/challenge', async (req, res) => {
   try {
@@ -81,16 +85,17 @@ router.post('/verify', async (req, res) => {
 });
 
 // POST /api/halo/account/delete
-// Same signed challenge as /verify. Deletes this address's Halo account data.
+// Same signed challenge as /verify. Keeps posts and reply threads, relabels the
+// author as "deleted user - <name>", and removes profile, auth, and contact data.
 // Does not move or destroy on-chain coins.
 router.post('/account/delete', async (req, res) => {
   try {
-    const { error, value } = verifyBodySchema.validate(req.body);
+    const { error, value } = deleteBodySchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: 'Validation error', details: error.details[0].message });
     }
 
-    const { address, nonce, signature, pubkey, bundleId } = value;
+    const { address, nonce, signature, pubkey, bundleId, displayName } = value;
     const challengeData = await consumeChallenge(address, nonce);
     if (!challengeData) {
       return res.status(400).json({ error: 'Invalid or expired challenge' });
@@ -112,11 +117,11 @@ router.post('/account/delete', async (req, res) => {
       return res.status(400).json({ error: 'Signature verification failed' });
     }
 
-    const redisResult = await deleteAccountData(address);
-    let cassandraResult = { skipped: true, deletedPosts: 0 };
+    const redisResult = await deleteAccountData(address, displayName);
+    let cassandraResult = { skipped: true, relabeledPosts: 0, postsKept: true };
     if (typeof cassandra.deleteAccountData === 'function') {
       try {
-        cassandraResult = await cassandra.deleteAccountData(address);
+        cassandraResult = await cassandra.deleteAccountData(address, displayName);
       } catch (cassandraError) {
         logger.error('Cassandra account deletion failed', cassandraError);
         cassandraResult = { skipped: false, error: 'cassandra_delete_failed', deletedPosts: 0 };
